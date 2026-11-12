@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123f34">
+  <title>E-project | Gestão acadêmica UFAM</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#" aria-label="E-project, início">
+        <span class="brand-mark">E<span>.</span></span>
+        <span class="brand-copy"><strong>E-project</strong><small>GESTÃO ACADÊMICA</small></span>
+      </a>
+      <div class="institution"><span class="institution-seal">U</span><span>Universidade Federal<br>do Amazonas</span></div>
+      <p class="nav-label">MENU PRINCIPAL</p>
+      <nav class="main-nav" aria-label="Menu principal">
+        <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span>Visão geral</button>
+        <button class="nav-item" data-view="projects"><span class="nav-icon">▤</span>Projetos <span class="nav-count" id="project-nav-count">0</span></button>
+        <button class="nav-item" data-view="activities"><span class="nav-icon">◷</span>Atividades</button>
+        <button class="nav-item" data-view="calendar"><span class="nav-icon">▦</span>Agenda</button>
+        <button class="nav-item" data-view="people"><span class="nav-icon">◎</span>Participantes</button>
+        <button class="nav-item" data-view="reports"><span class="nav-icon">▥</span>Relatórios</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="help-card"><strong>Organize sua pesquisa</strong><p>Acompanhe projetos, prazos e entregas em um só lugar.</p></div>
+        <div class="user-card"><div class="avatar avatar-sidebar">AD</div><div><strong>Administrador</strong><small>Coordenação acadêmica</small></div><span class="user-more">•••</span></div>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menu">Menu</button>
+        <div class="breadcrumbs"><span>UFAM</span><span class="crumb-separator">/</span><strong id="breadcrumb-current">Visão geral</strong></div>
+        <div class="topbar-actions">
+          <label class="search-box"><span>⌕</span><input id="global-search" type="search" placeholder="Buscar..." aria-label="Buscar"></label>
+          <button class="icon-button notification-button" data-action="enable-reminders" aria-label="Ativar lembretes do calendário" title="Ativar lembretes do calendário">!</button>
+          <div class="avatar avatar-top">AD</div>
+        </div>
+      </header>
+      <section class="page-content" id="page-content"></section>
+      <footer class="footer"><span>E-project <b>·</b> Gestão de atividades acadêmicas</span><span>Universidade Federal do Amazonas</span></footer>
+    </main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+</body>
+</html>
