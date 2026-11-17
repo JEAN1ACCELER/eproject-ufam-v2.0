@@ -28,12 +28,18 @@ const seedData = {
     { id: "a4", title: "Catalogação das entrevistas", projectId: "p3", responsibleId: "u5", dueDate: dateOffset(18), status: "Pendente", type: "Pesquisa", description: "Revisar metadados e organizar arquivos do acervo." },
     { id: "a5", title: "Reunião de acompanhamento", projectId: "p4", responsibleId: "u4", dueDate: dateOffset(-2), status: "Concluída", type: "Reunião", description: "Avaliar cronograma e próximos passos do projeto." }
   ],
-  events: []
+  events: [],
+  edital: [],
+  documents: [],
+  attendance: [],
+  notifications: []
 };
 
 const state = {
-  data: { projects: [], people: [], activities: [], events: [] },
+  data: { projects: [], people: [], activities: [], events: [], edital: [], documents: [], attendance: [], notifications: [], users: [] },
   ready: false,
+  user: null,
+  token: localStorage.getItem("eproject-session-token") || "",
   view: "dashboard",
   calendarMonth: new Date(today.getFullYear(), today.getMonth(), 1),
   calendarMode: "month",
@@ -47,13 +53,20 @@ const views = {
   activities: "Atividades",
   people: "Participantes",
   calendar: "Agenda",
+  edital: "Editais",
+  documents: "Documentos",
+  attendance: "Presença",
+  notifications: "Notificações",
+  administration: "Administração",
   reports: "Relatórios"
 };
 
 async function apiRequest(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...options.headers },
+    headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
   let result = {};
@@ -72,7 +85,9 @@ function isApplicationData(value) {
 
 async function refreshData() {
   state.data = await apiRequest("/api/bootstrap");
-  if (!Array.isArray(state.data.events)) state.data.events = [];
+  for (const key of ["events", "edital", "documents", "attendance", "notifications", "users"]) {
+    if (!Array.isArray(state.data[key])) state.data[key] = [];
+  }
   if (state.ready) render();
 }
 
