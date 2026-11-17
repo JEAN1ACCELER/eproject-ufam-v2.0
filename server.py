@@ -7,6 +7,9 @@ import json
 import re
 import sqlite3
 import uuid
+import hashlib
+import secrets
+import hmac
 from datetime import date, datetime
 from contextlib import contextmanager
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +27,12 @@ API_ENTITIES = {
     "people": "participants",
     "activities": "activities",
     "events": "calendar_events",
+    "edital": "edital",
+    "documents": "project_documents",
+    "attendance": "meeting_attendance",
+    "notifications": "notifications",
 }
+SESSIONS: dict[str, dict] = {}
 STATUSES = {
     "projects": {"Planejado", "Em andamento", "Pausado", "Encerrado"},
     "activities": {"Pendente", "Em andamento", "Concluída"},
@@ -53,6 +61,23 @@ def initialize_database() -> None:
     with connect() as connection:
         connection.executescript((ROOT / "database.sql").read_text(encoding="utf-8"))
         connection.execute("PRAGMA user_version = 1")
+        if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+            accounts = (
+                ("u-admin", "Administrador UFAM", "admin@eproject.invalid", "ADMINISTRADOR"),
+                ("u-orientador", "Orientador de Pesquisa", "orientador@eproject.invalid", "ORIENTADOR"),
+                ("u-orientando", "Orientando Demonstrativo", "orientando@eproject.invalid", "ORIENTANDO"),
+                ("u-coordenador", "Coordenador de Grupo", "coordenador@eproject.invalid", "COORDENADOR"),
+            )
+            for identifier, name, email, role in accounts:
+                salt, password_hash, iterations = password_credential("Eproject123!")
+                connection.execute(
+                    "INSERT INTO users (id, name, email, role, accepted_terms, accepted_privacy) VALUES (?, ?, ?, ?, 1, 1)",
+                    (identifier, name, email, role),
+                )
+                connection.execute(
+                    "INSERT INTO password_credentials (user_id, password_salt, password_hash, iterations) VALUES (?, ?, ?, ?)",
+                    (identifier, salt, password_hash, iterations),
+                )
 
 
 def clean_text(payload: dict, key: str, *, required: bool = False, limit: int = 5000) -> str:
@@ -106,6 +131,51 @@ def record_id(payload: dict, *, imported: bool = False) -> str:
             raise ValueError("O identificador do registro é inválido.")
         return value
     return uuid.uuid4().hex
+
+
+ITERATIONS = 210000
+
+
+def password_credential(password: str) -> tuple[str, str, int]:
+    if not isinstance(password, str) or len(password) < 8:
+        raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+    if len(password) > 128:
+        raise ValueError("A senha ultrapassa o limite de 128 caracteres.")
+    salt = secrets.token_hex(16)
+    derived = hashlib.scrypt(password.encode("utf-8"), salt=salt.encode("utf-8"), n=2**14, r=8, p=1, dklen=32)
+    return salt, derived.hex(), ITERATIONS
+
+
+def verify_password(password: str, salt: str, password_hash: str) -> bool:
+    if not isinstance(password, str):
+        return False
+    try:
+        derived = hashlib.scrypt(password.encode("utf-8"), salt=salt.encode("utf-8"), n=2**14, r=8, p=1, dklen=32)
+        return hmac.compare_digest(derived.hex(), password_hash)
+    except (ValueError, TypeError):
+        return False
+
+
+def bearer_user(handler: "EProjectHandler") -> dict | None:
+    authorization = handler.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    session = SESSIONS.get(authorization[7:].strip())
+    return session
+
+
+def require_user(handler: "EProjectHandler") -> dict:
+    user = bearer_user(handler)
+    if user is None:
+        raise PermissionError("Autenticação necessária.")
+    return user
+
+
+def require_role(handler: "EProjectHandler", allowed: set[str]) -> dict:
+    user = require_user(handler)
+    if user["role"] not in allowed:
+        raise PermissionError("Você não possui autorização para esta operação.")
+    return user
 
 
 def project_values(payload: dict) -> tuple:
@@ -211,7 +281,17 @@ def rows_for(connection: sqlite3.Connection, table: str) -> list[dict]:
         rows = connection.execute("SELECT id, name, email, role, unit, project_id AS projectId FROM participants ORDER BY name")
     elif table == "activities":
         rows = connection.execute("SELECT id, title, project_id AS projectId, responsible_id AS responsibleId, due_date AS dueDate, status, type, description FROM activities ORDER BY due_date, title")
-    else:
+    elif table == "edital":
+        rows = connection.execute("SELECT id, title, source, pro_reitoria AS proReitoria, area, publication_date AS publicationDate, deadline, status, url, description FROM edital ORDER BY deadline, title")
+    elif table == "project_documents":
+        rows = connection.execute("SELECT id, project_id AS projectId, title, file_name AS fileName, file_type AS fileType, file_size AS fileSize, content, owner_id AS ownerId FROM project_documents ORDER BY title")
+    elif table == "meeting_attendance":
+        rows = connection.execute("SELECT id, event_id AS eventId, participant_id AS participantId, checked_in_at AS checkedInAt, location FROM meeting_attendance ORDER BY checked_in_at")
+    elif table == "notifications":
+        rows = connection.execute("SELECT id, user_id AS userId, title, message, category, read FROM notifications ORDER BY created_at DESC")
+    elif table == "users":
+        rows = connection.execute("SELECT id, name, email, cpf, cns, role, accepted_terms AS acceptedTerms, accepted_privacy AS acceptedPrivacy, active FROM users ORDER BY name")
+    elif table == "calendar_events":
         rows = connection.execute(
             """SELECT e.id, e.title, e.project_id AS projectId, e.activity_id AS activityId,
                       e.responsible_id AS responsibleId, e.event_type AS type, e.start_at AS startAt,
@@ -238,6 +318,11 @@ def bootstrap_data() -> dict:
             "people": rows_for(connection, "participants"),
             "activities": rows_for(connection, "activities"),
             "events": rows_for(connection, "calendar_events"),
+            "edital": rows_for(connection, "edital"),
+            "documents": rows_for(connection, "project_documents"),
+            "attendance": rows_for(connection, "meeting_attendance"),
+            "notifications": rows_for(connection, "notifications"),
+            "users": rows_for(connection, "users"),
         }
 
 
@@ -418,6 +503,155 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                 import_initial_data(self.read_json())
                 self.send_json(201, {"message": "Dados iniciais importados."})
                 return True
+            if path == "/api/register" and self.command == "POST":
+                payload = self.read_json()
+                name = clean_text(payload, "name", required=True, limit=120)
+                email = clean_text(payload, "email", required=True, limit=254).lower()
+                role = clean_text(payload, "role") or "ORIENTANDO"
+                cpf = clean_text(payload, "cpf", limit=14) or None
+                cns = clean_text(payload, "cns", limit=20) or None
+                password = payload.get("password")
+                accepted_terms = payload.get("acceptedTerms") is True
+                accepted_privacy = payload.get("acceptedPrivacy") is True
+                if role not in {"ORIENTADOR", "ORIENTANDO", "COORDENADOR", "ADMINISTRADOR"}:
+                    raise ValueError("O perfil informado não é válido.")
+                if "@" not in email or email.startswith("@") or email.endswith("@"):
+                    raise ValueError("Informe um e-mail válido.")
+                if not accepted_terms or not accepted_privacy:
+                    raise ValueError("É necessário aceitar os termos e a política de privacidade.")
+                with connect() as connection:
+                    if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+                        raise sqlite3.IntegrityError("E-mail já cadastrado.")
+                    identifier = uuid.uuid4().hex
+                    salt, password_hash, iterations = password_credential(password)
+                    connection.execute(
+                        "INSERT INTO users (id, name, email, cpf, cns, role, accepted_terms, accepted_privacy) VALUES (?, ?, ?, ?, ?, ?, 1, 1)",
+                        (identifier, name, email, cpf, cns, role),
+                    )
+                    connection.execute(
+                        "INSERT INTO password_credentials (user_id, password_salt, password_hash, iterations) VALUES (?, ?, ?, ?)",
+                        (identifier, salt, password_hash, iterations),
+                    )
+                self.send_json(201, {"id": identifier, "message": "Cadastro realizado com sucesso."})
+                return True
+            if path == "/api/login" and self.command == "POST":
+                payload = self.read_json()
+                email = clean_text(payload, "email", required=True, limit=254).lower()
+                password = payload.get("password")
+                with connect() as connection:
+                    user = connection.execute(
+                        "SELECT u.id, u.name, u.email, u.role, u.active, p.password_salt, p.password_hash FROM users u JOIN password_credentials p ON p.user_id = u.id WHERE u.email = ?",
+                        (email,),
+                    ).fetchone()
+                if user is None or not user["active"] or not verify_password(password if isinstance(password, str) else "", user["password_salt"], user["password_hash"]):
+                    raise LookupError("E-mail ou senha inválidos.")
+                token = secrets.token_urlsafe(32)
+                session = {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}
+                SESSIONS[token] = session
+                self.send_json(200, {"token": token, "user": session})
+                return True
+            if path == "/api/logout" and self.command == "POST":
+                authorization = self.headers.get("Authorization", "")
+                if authorization.startswith("Bearer "):
+                    SESSIONS.pop(authorization[7:].strip(), None)
+                self.send_json(200, {"message": "Sessão encerrada."})
+                return True
+            if path == "/api/session" and self.command == "GET":
+                self.send_json(200, {"user": require_user(self)})
+                return True
+            if path == "/api/users" and self.command == "GET":
+                require_role(self, {"ADMINISTRADOR", "COORDENADOR"})
+                with connect() as connection:
+                    users = [dict(row) for row in connection.execute(
+                        "SELECT id, name, email, cpf, cns, role, active FROM users ORDER BY name"
+                    )]
+                self.send_json(200, {"users": users})
+                return True
+            if path in {"/api/editais", "/api/documents", "/api/attendance", "/api/notifications"}:
+                kind = path.rsplit("/", 1)[1]
+                require_user(self)
+                table = {"editais": "edital", "documents": "project_documents", "attendance": "meeting_attendance", "notifications": "notifications"}[kind]
+                if self.command == "GET":
+                    with connect() as connection:
+                        self.send_json(200, {kind: rows_for(connection, table)})
+                    return True
+                if self.command == "POST":
+                    payload = self.read_json()
+                    identifier = uuid.uuid4().hex
+                    with connect() as connection:
+                        if kind == "editais":
+                            connection.execute(
+                                "INSERT INTO edital (id,title,source,pro_reitoria,area,publication_date,deadline,status,url,description) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (identifier, clean_text(payload, "title", required=True, limit=200),
+                                 clean_text(payload, "source", limit=120), clean_text(payload, "proReitoria", limit=120),
+                                 clean_text(payload, "area", limit=120), clean_optional_date(payload.get("publicationDate"), "publicação"),
+                                 clean_optional_date(payload.get("deadline"), "prazo"), clean_text(payload, "status") or "Aberto",
+                                 clean_text(payload, "url", limit=500), clean_text(payload, "description", limit=5000)),
+                            )
+                        elif kind == "documents":
+                            project_id = optional_reference(connection, payload.get("projectId"), "projects", "projeto")
+                            if project_id is None:
+                                raise ValueError("Selecione um projeto válido.")
+                            connection.execute(
+                                "INSERT INTO project_documents (id,project_id,title,file_name,file_type,file_size,content,owner_id) VALUES (?,?,?,?,?,?,?,?)",
+                                (identifier, project_id, clean_text(payload, "title", required=True, limit=200),
+                                 clean_text(payload, "fileName", limit=255), clean_text(payload, "fileType", limit=120),
+                                 max(0, int(payload.get("fileSize", 0))), clean_text(payload, "content", limit=10000),
+                                 require_user(self)["id"]),
+                            )
+                        elif kind == "attendance":
+                            event_id = optional_reference(connection, payload.get("eventId"), "calendar_events", "reunião")
+                            participant_id = optional_reference(connection, payload.get("participantId"), "participants", "participante")
+                            if event_id is None or participant_id is None:
+                                raise ValueError("Reunião e participante são obrigatórios.")
+                            connection.execute(
+                                "INSERT INTO meeting_attendance (id,event_id,participant_id,checked_in_at,location) VALUES (?,?,?,?,?)",
+                                (identifier, event_id, participant_id, clean_datetime(payload.get("checkedInAt"), "check-in"),
+                                 clean_text(payload, "location", limit=240)),
+                            )
+                        else:
+                            user_id = optional_reference(connection, payload.get("userId"), "users", "usuário")
+                            connection.execute(
+                                "INSERT INTO notifications (id,user_id,title,message,category) VALUES (?,?,?,?,?)",
+                                (identifier, user_id, clean_text(payload, "title", required=True, limit=200),
+                                 clean_text(payload, "message", required=True, limit=1000),
+                                 clean_text(payload, "category") or "Sistema"),
+                            )
+                    self.send_json(201, {"id": identifier})
+                    return True
+            custom_match = re.match(r"^/api/(editais|documents|attendance|notifications)/([A-Za-z0-9_-]{1,80})$", path)
+            if custom_match:
+                kind, identifier = custom_match.groups()
+                require_user(self)
+                table = {"editais": "edital", "documents": "project_documents", "attendance": "meeting_attendance", "notifications": "notifications"}[kind]
+                if self.command == "DELETE":
+                    with connect() as connection:
+                        cursor = connection.execute(f"DELETE FROM {table} WHERE id = ?", (identifier,))
+                        if cursor.rowcount == 0:
+                            raise LookupError("Registro não encontrado.")
+                    self.send_json(200, {"id": identifier})
+                    return True
+                if self.command == "PUT":
+                    payload = self.read_json()
+                    with connect() as connection:
+                        if kind == "editais":
+                            connection.execute(
+                                "UPDATE edital SET title=?,source=?,pro_reitoria=?,area=?,publication_date=?,deadline=?,status=?,url=?,description=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (clean_text(payload, "title", required=True, limit=200),
+                                 clean_text(payload, "source", limit=120), clean_text(payload, "proReitoria", limit=120),
+                                 clean_text(payload, "area", limit=120), clean_optional_date(payload.get("publicationDate"), "publicação"),
+                                 clean_optional_date(payload.get("deadline"), "prazo"), clean_text(payload, "status") or "Aberto",
+                                 clean_text(payload, "url", limit=500), clean_text(payload, "description", limit=5000), identifier),
+                            )
+                        elif kind == "notifications":
+                            connection.execute(
+                                "UPDATE notifications SET read=? WHERE id=?",
+                                (1 if payload.get("read") else 0, identifier),
+                            )
+                        else:
+                            raise LookupError("A atualização deste tipo não está disponível.")
+                    self.send_json(200, {"id": identifier})
+                    return True
 
             parts = path.strip("/").split("/")
             entity = parts[1] if len(parts) >= 2 else ""
@@ -445,6 +679,8 @@ class EProjectHandler(SimpleHTTPRequestHandler):
             self.send_json(405, {"error": "Método não permitido para este endpoint."})
         except LookupError as exc:
             self.send_json(404, {"error": str(exc)})
+        except PermissionError as exc:
+            self.send_json(403, {"error": str(exc)})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except RuntimeError as exc:
