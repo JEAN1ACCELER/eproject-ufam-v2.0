@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -20,12 +21,13 @@ from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
-DATABASE = ROOT / "data" / "eproject.sqlite3"
+DATABASE = Path(os.environ.get("EPROJECT_DATABASE", str(ROOT / "data" / "eproject-ufam.sqlite3"))).expanduser()
 MAX_BODY_SIZE = 1_000_000
 API_ENTITIES = {
     "projects": "projects",
     "people": "participants",
     "activities": "activities",
+    "tasks": "activities",
     "events": "calendar_events",
     "edital": "edital",
     "documents": "project_documents",
@@ -34,8 +36,8 @@ API_ENTITIES = {
 }
 SESSIONS: dict[str, dict] = {}
 STATUSES = {
-    "projects": {"Planejado", "Em andamento", "Pausado", "Encerrado"},
-    "activities": {"Pendente", "Em andamento", "Concluída"},
+    "projects": {"Planejado", "Em andamento", "Concluído", "Suspenso", "Cancelado", "Pausado", "Encerrado"},
+    "activities": {"Pendente", "Em andamento", "Concluída", "Cancelada"},
     "events": {"Agendado", "Realizado", "Cancelado"},
 }
 ROLES = {"Professor(a)", "Aluno(a)", "Voluntário(a)"}
@@ -59,25 +61,91 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def initialize_database() -> None:
     with connect() as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
         connection.executescript((ROOT / "database.sql").read_text(encoding="utf-8"))
-        connection.execute("PRAGMA user_version = 1")
-        if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-            accounts = (
-                ("u-admin", "Administrador UFAM", "admin@eproject.invalid", "ADMINISTRADOR"),
-                ("u-orientador", "Orientador de Pesquisa", "orientador@eproject.invalid", "ORIENTADOR"),
-                ("u-orientando", "Orientando Demonstrativo", "orientando@eproject.invalid", "ORIENTANDO"),
-                ("u-coordenador", "Coordenador de Grupo", "coordenador@eproject.invalid", "COORDENADOR"),
+        project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)")}
+        if "owner_id" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE SET NULL")
+        project_schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'"
+        ).fetchone()["sql"]
+        if not all(status in project_schema for status in ("Concluído", "Suspenso", "Cancelado")):
+            connection.execute(
+                """CREATE TABLE projects_new (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
+                    program TEXT NOT NULL CHECK (length(program) BETWEEN 1 AND 60),
+                    coordinator TEXT NOT NULL DEFAULT '',
+                    unit TEXT NOT NULL DEFAULT '',
+                    start_date TEXT,
+                    end_date TEXT,
+                    status TEXT NOT NULL DEFAULT 'Planejado'
+                        CHECK (status IN ('Planejado', 'Em andamento', 'Concluído', 'Suspenso', 'Cancelado', 'Pausado', 'Encerrado')),
+                    progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+                    description TEXT NOT NULL DEFAULT '',
+                    owner_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (start_date IS NULL OR end_date IS NULL OR start_date <= end_date)
+                )"""
             )
-            for identifier, name, email, role in accounts:
-                salt, password_hash, iterations = password_credential("Eproject123!")
+            connection.execute(
+                """INSERT INTO projects_new
+                   (id, name, program, coordinator, unit, start_date, end_date, status, progress, description, owner_id, created_at, updated_at)
+                   SELECT id, name, program, coordinator, unit, start_date, end_date, status, progress, description, owner_id, created_at, updated_at
+                   FROM projects"""
+            )
+            connection.execute("DROP TABLE projects")
+            connection.execute("ALTER TABLE projects_new RENAME TO projects")
+        activity_schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activities'"
+        ).fetchone()["sql"]
+        if "project_id TEXT NOT NULL" not in activity_schema or "Cancelada" not in activity_schema:
+            orphan_count = connection.execute("SELECT COUNT(*) FROM activities WHERE project_id IS NULL").fetchone()[0]
+            if orphan_count:
+                legacy_project_id = f"legacy-{uuid.uuid4().hex}"
                 connection.execute(
-                    "INSERT INTO users (id, name, email, role, accepted_terms, accepted_privacy) VALUES (?, ?, ?, ?, 1, 1)",
-                    (identifier, name, email, role),
+                    "INSERT INTO projects (id, name, program, status, progress, description) VALUES (?, ?, ?, ?, 0, ?)",
+                    (legacy_project_id, "Tarefas sem projeto (dados legados)", "Legado", "Planejado", "Projeto criado para preservar tarefas antigas sem vínculo."),
                 )
-                connection.execute(
-                    "INSERT INTO password_credentials (user_id, password_salt, password_hash, iterations) VALUES (?, ?, ?, ?)",
-                    (identifier, salt, password_hash, iterations),
-                )
+                connection.execute("UPDATE activities SET project_id = ? WHERE project_id IS NULL", (legacy_project_id,))
+            connection.execute("DROP TRIGGER IF EXISTS activities_require_project_insert")
+            connection.execute("DROP TRIGGER IF EXISTS activities_require_project_update")
+            connection.execute("DROP INDEX IF EXISTS idx_activities_due_date")
+            connection.execute("DROP INDEX IF EXISTS idx_activities_project")
+            connection.execute(
+                """CREATE TABLE activities_new (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    responsible_id TEXT REFERENCES participants(id) ON DELETE SET NULL,
+                    due_date TEXT,
+                    status TEXT NOT NULL DEFAULT 'Pendente'
+                        CHECK (status IN ('Pendente', 'Em andamento', 'Concluída', 'Cancelada')),
+                    type TEXT NOT NULL DEFAULT 'Outro',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO activities_new
+                   (id, title, project_id, responsible_id, due_date, status, type, description, created_at, updated_at)
+                   SELECT id, title, project_id, responsible_id, due_date, status, type, description, created_at, updated_at
+                   FROM activities"""
+            )
+            connection.execute("DROP TABLE activities")
+            connection.execute("ALTER TABLE activities_new RENAME TO activities")
+            connection.execute("CREATE INDEX idx_activities_due_date ON activities(due_date)")
+            connection.execute("CREATE INDEX idx_activities_project ON activities(project_id)")
+        connection.execute(
+            "UPDATE users SET active = 0 WHERE (id, email) IN ((?, ?), (?, ?), (?, ?), (?, ?))",
+            ("u-admin", "admin@eproject.invalid", "u-orientador", "orientador@eproject.invalid",
+             "u-orientando", "orientando@eproject.invalid", "u-coordenador", "coordenador@eproject.invalid"),
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA user_version = 3")
 
 
 def clean_text(payload: dict, key: str, *, required: bool = False, limit: int = 5000) -> str:
@@ -124,6 +192,21 @@ def optional_reference(connection: sqlite3.Connection, value: object, table: str
     return value
 
 
+def required_reference(connection: sqlite3.Connection, value: object, table: str, key: str) -> str:
+    reference = optional_reference(connection, value, table, key)
+    if reference is None:
+        raise ValueError(f"Selecione um registro válido em '{key}'.")
+    return reference
+
+
+def require_project_access(connection: sqlite3.Connection, project_id: str, user: dict) -> None:
+    project = connection.execute("SELECT owner_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if project is None:
+        raise LookupError("Projeto não encontrado.")
+    if project["owner_id"] != user["id"]:
+        raise PermissionError("Você não possui autorização para acessar este projeto.")
+
+
 def record_id(payload: dict, *, imported: bool = False) -> str:
     value = payload.get("id")
     if imported and value is not None:
@@ -164,10 +247,14 @@ def bearer_user(handler: "EProjectHandler") -> dict | None:
     return session
 
 
+class AuthenticationError(PermissionError):
+    pass
+
+
 def require_user(handler: "EProjectHandler") -> dict:
     user = bearer_user(handler)
     if user is None:
-        raise PermissionError("Autenticação necessária.")
+        raise AuthenticationError("Autenticação necessária.")
     return user
 
 
@@ -203,8 +290,6 @@ def project_values(payload: dict) -> tuple:
         progress,
         clean_text(payload, "description", limit=5000),
     )
-
-
 def participant_values(connection: sqlite3.Connection, payload: dict) -> tuple:
     role = clean_text(payload, "role", required=True, limit=30)
     if role not in ROLES:
@@ -217,7 +302,7 @@ def participant_values(connection: sqlite3.Connection, payload: dict) -> tuple:
         email,
         role,
         clean_text(payload, "unit", limit=160),
-        optional_reference(connection, payload.get("projectId"), "projects", "projeto"),
+        required_reference(connection, payload.get("projectId"), "projects", "projeto"),
     )
 
 
@@ -228,7 +313,7 @@ def activity_values(connection: sqlite3.Connection, payload: dict) -> tuple:
     due_date = clean_optional_date(payload.get("dueDate"), "prazo")
     return (
         clean_text(payload, "title", required=True, limit=200),
-        optional_reference(connection, payload.get("projectId"), "projects", "projeto"),
+        required_reference(connection, payload.get("projectId"), "projects", "projeto"),
         optional_reference(connection, payload.get("responsibleId"), "participants", "responsável"),
         due_date,
         status,
@@ -260,7 +345,7 @@ def event_values(connection: sqlite3.Connection, payload: dict) -> tuple:
         optional_reference(connection, participant_id, "participants", "participante")
     return (
         clean_text(payload, "title", required=True, limit=200),
-        optional_reference(connection, payload.get("projectId"), "projects", "projeto"),
+        required_reference(connection, payload.get("projectId"), "projects", "projeto"),
         optional_reference(connection, payload.get("activityId"), "activities", "atividade"),
         optional_reference(connection, payload.get("responsibleId"), "participants", "responsável"),
         clean_text(payload, "type") or "Reunião",
@@ -274,9 +359,14 @@ def event_values(connection: sqlite3.Connection, payload: dict) -> tuple:
     )
 
 
-def rows_for(connection: sqlite3.Connection, table: str) -> list[dict]:
+def rows_for(connection: sqlite3.Connection, table: str, *, owner_id: str | None = None) -> list[dict]:
     if table == "projects":
-        rows = connection.execute("SELECT id, name, program, coordinator, unit, start_date AS start, end_date AS end, status, progress, description FROM projects ORDER BY name")
+        rows = connection.execute(
+            "SELECT id, name, program, coordinator, unit, start_date AS start, end_date AS end, status, progress, description FROM projects WHERE owner_id = ? ORDER BY name",
+            (owner_id,),
+        ) if owner_id is not None else connection.execute(
+            "SELECT id, name, program, coordinator, unit, start_date AS start, end_date AS end, status, progress, description FROM projects ORDER BY name"
+        )
     elif table == "participants":
         rows = connection.execute("SELECT id, name, email, role, unit, project_id AS projectId FROM participants ORDER BY name")
     elif table == "activities":
@@ -310,19 +400,25 @@ def rows_for(connection: sqlite3.Connection, table: str) -> list[dict]:
     return results
 
 
-def bootstrap_data() -> dict:
+def bootstrap_data(user: dict) -> dict:
     initialize_database()
     with connect() as connection:
+        projects = rows_for(connection, "projects", owner_id=user["id"])
+        project_ids = {project["id"] for project in projects}
+        people = [person for person in rows_for(connection, "participants") if person["projectId"] in project_ids]
+        activities = [activity for activity in rows_for(connection, "activities") if activity["projectId"] in project_ids]
+        events = [event for event in rows_for(connection, "calendar_events") if event["projectId"] in project_ids]
+        event_ids = {event["id"] for event in events}
         return {
-            "projects": rows_for(connection, "projects"),
-            "people": rows_for(connection, "participants"),
-            "activities": rows_for(connection, "activities"),
-            "events": rows_for(connection, "calendar_events"),
+            "projects": projects,
+            "people": people,
+            "activities": activities,
+            "tasks": activities,
+            "events": events,
             "edital": rows_for(connection, "edital"),
-            "documents": rows_for(connection, "project_documents"),
-            "attendance": rows_for(connection, "meeting_attendance"),
-            "notifications": rows_for(connection, "notifications"),
-            "users": rows_for(connection, "users"),
+            "documents": [item for item in rows_for(connection, "project_documents") if item["projectId"] in project_ids],
+            "attendance": [item for item in rows_for(connection, "meeting_attendance") if item["eventId"] in event_ids],
+            "notifications": [item for item in rows_for(connection, "notifications") if item["userId"] in (None, user["id"])],
         }
 
 
@@ -332,15 +428,16 @@ def _create_record(
     payload: dict,
     *,
     imported: bool = False,
+    user_id: str | None = None,
 ) -> str:
     identifier = record_id(payload, imported=imported)
     if entity == "projects":
         values = project_values(payload)
         connection.execute(
             """INSERT INTO projects
-               (id, name, program, coordinator, unit, start_date, end_date, status, progress, description)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (identifier, *values),
+                    (id, name, program, coordinator, unit, start_date, end_date, status, progress, description, owner_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (identifier, *values, user_id),
         )
     elif entity == "people":
         values = participant_values(connection, payload)
@@ -372,16 +469,32 @@ def _create_record(
     return identifier
 
 
-def create_record(entity: str, payload: dict, *, imported: bool = False) -> str:
+def canonical_entity(entity: str) -> str:
+    return "activities" if entity == "tasks" else entity
+
+
+def create_record(entity: str, payload: dict, user: dict, *, imported: bool = False) -> str:
+    entity = canonical_entity(entity)
     with connect() as connection:
-        return _create_record(connection, entity, payload, imported=imported)
+        if entity != "projects":
+            project_id = required_reference(connection, payload.get("projectId"), "projects", "projeto")
+            require_project_access(connection, project_id, user)
+        return _create_record(connection, entity, payload, imported=imported, user_id=user["id"])
 
 
-def update_record(entity: str, identifier: str, payload: dict) -> None:
+def update_record(entity: str, identifier: str, payload: dict, user: dict) -> None:
+    entity = canonical_entity(entity)
     table = API_ENTITIES[entity]
     with connect() as connection:
-        if connection.execute(f"SELECT 1 FROM {table} WHERE id = ?", (identifier,)).fetchone() is None:
+        current = connection.execute(f"SELECT * FROM {table} WHERE id = ?", (identifier,)).fetchone()
+        if current is None:
             raise LookupError("Registro não encontrado.")
+        if entity == "projects":
+            require_project_access(connection, identifier, user)
+        else:
+            require_project_access(connection, current["project_id"], user)
+            project_id = required_reference(connection, payload.get("projectId"), "projects", "projeto")
+            require_project_access(connection, project_id, user)
         if entity == "projects":
             values = project_values(payload)
             connection.execute(
@@ -418,21 +531,30 @@ def update_record(entity: str, identifier: str, payload: dict) -> None:
             )
 
 
-def delete_record(entity: str, identifier: str) -> None:
+def delete_record(entity: str, identifier: str, user: dict) -> None:
+    entity = canonical_entity(entity)
     table = API_ENTITIES[entity]
     with connect() as connection:
+        if entity == "projects":
+            require_project_access(connection, identifier, user)
+            connection.execute("DELETE FROM activities WHERE project_id = ?", (identifier,))
+        else:
+            row = connection.execute(f"SELECT project_id FROM {table} WHERE id = ?", (identifier,)).fetchone()
+            if row is None:
+                raise LookupError("Registro não encontrado.")
+            require_project_access(connection, row["project_id"], user)
         cursor = connection.execute(f"DELETE FROM {table} WHERE id = ?", (identifier,))
         if cursor.rowcount == 0:
             raise LookupError("Registro não encontrado.")
 
 
-def import_initial_data(payload: dict) -> None:
+def import_initial_data(payload: dict, user: dict) -> None:
     if not isinstance(payload, dict):
         raise ValueError("O conteúdo da importação é inválido.")
     initialize_database()
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        count = sum(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in API_ENTITIES.values())
+        count = sum(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in set(API_ENTITIES.values()))
         if count:
             raise RuntimeError("O banco já possui dados; a importação inicial foi recusada.")
         for entity in ("projects", "people", "activities", "events"):
@@ -442,7 +564,10 @@ def import_initial_data(payload: dict) -> None:
             for record in records:
                 if not isinstance(record, dict):
                     raise ValueError(f"Há um registro inválido em '{entity}'.")
-                _create_record(connection, entity, record, imported=True)
+                if entity != "projects":
+                    project_id = required_reference(connection, record.get("projectId"), "projects", "projeto")
+                    require_project_access(connection, project_id, user)
+                _create_record(connection, entity, record, imported=True, user_id=user["id"])
 
 
 class EProjectHandler(SimpleHTTPRequestHandler):
@@ -484,54 +609,60 @@ class EProjectHandler(SimpleHTTPRequestHandler):
             return False
         try:
             if path == "/api/bootstrap" and self.command == "GET":
-                self.send_json(200, bootstrap_data())
+                user = require_user(self)
+                self.send_json(200, bootstrap_data(user))
                 return True
             if path == "/api/backup" and self.command == "GET":
+                require_role(self, {"ADMINISTRADOR"})
                 initialize_database()
                 with connect() as connection:
                     self.send_download(connection.serialize(), "application/vnd.sqlite3", "eproject-backup.sqlite3")
                 return True
             if path == "/api/events" and self.command == "GET":
+                user = require_user(self)
                 query = parse_qs(parsed.query)
-                events = bootstrap_data()["events"]
+                events = bootstrap_data(user)["events"]
                 if query.get("from") and query.get("to"):
                     start, end = query["from"][0], query["to"][0]
                     events = [event for event in events if start <= event["startAt"][:10] <= end]
                 self.send_json(200, {"events": events})
                 return True
             if path == "/api/import" and self.command == "POST":
-                import_initial_data(self.read_json())
+                user = require_role(self, {"ORIENTADOR", "ADMINISTRADOR"})
+                import_initial_data(self.read_json(), user)
                 self.send_json(201, {"message": "Dados iniciais importados."})
                 return True
             if path == "/api/register" and self.command == "POST":
                 payload = self.read_json()
                 name = clean_text(payload, "name", required=True, limit=120)
                 email = clean_text(payload, "email", required=True, limit=254).lower()
-                role = clean_text(payload, "role") or "ORIENTANDO"
                 cpf = clean_text(payload, "cpf", limit=14) or None
                 cns = clean_text(payload, "cns", limit=20) or None
                 password = payload.get("password")
                 accepted_terms = payload.get("acceptedTerms") is True
                 accepted_privacy = payload.get("acceptedPrivacy") is True
-                if role not in {"ORIENTADOR", "ORIENTANDO", "COORDENADOR", "ADMINISTRADOR"}:
-                    raise ValueError("O perfil informado não é válido.")
                 if "@" not in email or email.startswith("@") or email.endswith("@"):
                     raise ValueError("Informe um e-mail válido.")
                 if not accepted_terms or not accepted_privacy:
                     raise ValueError("É necessário aceitar os termos e a política de privacidade.")
-                with connect() as connection:
-                    if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
-                        raise sqlite3.IntegrityError("E-mail já cadastrado.")
-                    identifier = uuid.uuid4().hex
-                    salt, password_hash, iterations = password_credential(password)
-                    connection.execute(
-                        "INSERT INTO users (id, name, email, cpf, cns, role, accepted_terms, accepted_privacy) VALUES (?, ?, ?, ?, ?, ?, 1, 1)",
-                        (identifier, name, email, cpf, cns, role),
-                    )
-                    connection.execute(
-                        "INSERT INTO password_credentials (user_id, password_salt, password_hash, iterations) VALUES (?, ?, ?, ?)",
-                        (identifier, salt, password_hash, iterations),
-                    )
+                try:
+                    with connect() as connection:
+                        account_count = connection.execute("SELECT COUNT(*) FROM users WHERE active = 1").fetchone()[0]
+                        role = "ORIENTADOR" if account_count == 0 else "ORIENTANDO"
+                        identifier = uuid.uuid4().hex
+                        salt, password_hash, iterations = password_credential(password)
+                        connection.execute(
+                            "INSERT INTO users (id, name, email, cpf, cns, role, accepted_terms, accepted_privacy) VALUES (?, ?, ?, ?, ?, ?, 1, 1)",
+                            (identifier, name, email, cpf, cns, role),
+                        )
+                        connection.execute(
+                            "INSERT INTO password_credentials (user_id, password_salt, password_hash, iterations) VALUES (?, ?, ?, ?)",
+                            (identifier, salt, password_hash, iterations),
+                        )
+                        if account_count == 0:
+                            connection.execute("UPDATE projects SET owner_id = ? WHERE owner_id IS NULL", (identifier,))
+                except sqlite3.IntegrityError as exc:
+                    raise RuntimeError("Não foi possível concluir o cadastro. Confira os dados informados.") from exc
                 self.send_json(201, {"id": identifier, "message": "Cadastro realizado com sucesso."})
                 return True
             if path == "/api/login" and self.command == "POST":
@@ -544,7 +675,7 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                         (email,),
                     ).fetchone()
                 if user is None or not user["active"] or not verify_password(password if isinstance(password, str) else "", user["password_salt"], user["password_hash"]):
-                    raise LookupError("E-mail ou senha inválidos.")
+                    raise AuthenticationError("E-mail ou senha inválidos.")
                 token = secrets.token_urlsafe(32)
                 session = {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}
                 SESSIONS[token] = session
@@ -569,11 +700,13 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                 return True
             if path in {"/api/editais", "/api/documents", "/api/attendance", "/api/notifications"}:
                 kind = path.rsplit("/", 1)[1]
-                require_user(self)
+                user = require_user(self)
+                if kind == "editais" and self.command in {"POST", "PUT", "DELETE"}:
+                    require_role(self, {"ADMINISTRADOR", "COORDENADOR"})
                 table = {"editais": "edital", "documents": "project_documents", "attendance": "meeting_attendance", "notifications": "notifications"}[kind]
                 if self.command == "GET":
-                    with connect() as connection:
-                        self.send_json(200, {kind: rows_for(connection, table)})
+                    data_key = {"editais": "edital", "documents": "documents", "attendance": "attendance", "notifications": "notifications"}[kind]
+                    self.send_json(200, {kind: bootstrap_data(user)[data_key]})
                     return True
                 if self.command == "POST":
                     payload = self.read_json()
@@ -589,9 +722,8 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                                  clean_text(payload, "url", limit=500), clean_text(payload, "description", limit=5000)),
                             )
                         elif kind == "documents":
-                            project_id = optional_reference(connection, payload.get("projectId"), "projects", "projeto")
-                            if project_id is None:
-                                raise ValueError("Selecione um projeto válido.")
+                            project_id = required_reference(connection, payload.get("projectId"), "projects", "projeto")
+                            require_project_access(connection, project_id, user)
                             connection.execute(
                                 "INSERT INTO project_documents (id,project_id,title,file_name,file_type,file_size,content,owner_id) VALUES (?,?,?,?,?,?,?,?)",
                                 (identifier, project_id, clean_text(payload, "title", required=True, limit=200),
@@ -600,20 +732,22 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                                  require_user(self)["id"]),
                             )
                         elif kind == "attendance":
-                            event_id = optional_reference(connection, payload.get("eventId"), "calendar_events", "reunião")
-                            participant_id = optional_reference(connection, payload.get("participantId"), "participants", "participante")
-                            if event_id is None or participant_id is None:
-                                raise ValueError("Reunião e participante são obrigatórios.")
+                            event_id = required_reference(connection, payload.get("eventId"), "calendar_events", "reunião")
+                            participant_id = required_reference(connection, payload.get("participantId"), "participants", "participante")
+                            event_project = connection.execute("SELECT project_id FROM calendar_events WHERE id = ?", (event_id,)).fetchone()
+                            person_project = connection.execute("SELECT project_id FROM participants WHERE id = ?", (participant_id,)).fetchone()
+                            require_project_access(connection, event_project["project_id"], user)
+                            if person_project["project_id"] != event_project["project_id"]:
+                                raise ValueError("O participante não pertence ao projeto da reunião.")
                             connection.execute(
                                 "INSERT INTO meeting_attendance (id,event_id,participant_id,checked_in_at,location) VALUES (?,?,?,?,?)",
                                 (identifier, event_id, participant_id, clean_datetime(payload.get("checkedInAt"), "check-in"),
                                  clean_text(payload, "location", limit=240)),
                             )
                         else:
-                            user_id = optional_reference(connection, payload.get("userId"), "users", "usuário")
                             connection.execute(
                                 "INSERT INTO notifications (id,user_id,title,message,category) VALUES (?,?,?,?,?)",
-                                (identifier, user_id, clean_text(payload, "title", required=True, limit=200),
+                                (identifier, user["id"], clean_text(payload, "title", required=True, limit=200),
                                  clean_text(payload, "message", required=True, limit=1000),
                                  clean_text(payload, "category") or "Sistema"),
                             )
@@ -622,10 +756,28 @@ class EProjectHandler(SimpleHTTPRequestHandler):
             custom_match = re.match(r"^/api/(editais|documents|attendance|notifications)/([A-Za-z0-9_-]{1,80})$", path)
             if custom_match:
                 kind, identifier = custom_match.groups()
-                require_user(self)
+                user = require_user(self)
+                if kind == "editais":
+                    require_role(self, {"ADMINISTRADOR", "COORDENADOR"})
                 table = {"editais": "edital", "documents": "project_documents", "attendance": "meeting_attendance", "notifications": "notifications"}[kind]
                 if self.command == "DELETE":
                     with connect() as connection:
+                        if kind == "documents":
+                            record = connection.execute("SELECT project_id FROM project_documents WHERE id = ?", (identifier,)).fetchone()
+                            if record is None:
+                                raise LookupError("Registro não encontrado.")
+                            require_project_access(connection, record["project_id"], user)
+                        elif kind == "attendance":
+                            record = connection.execute("SELECT e.project_id FROM meeting_attendance AS a JOIN calendar_events AS e ON e.id = a.event_id WHERE a.id = ?", (identifier,)).fetchone()
+                            if record is None:
+                                raise LookupError("Registro não encontrado.")
+                            require_project_access(connection, record["project_id"], user)
+                        elif kind == "notifications":
+                            record = connection.execute("SELECT user_id FROM notifications WHERE id = ?", (identifier,)).fetchone()
+                            if record is None:
+                                raise LookupError("Registro não encontrado.")
+                            if record["user_id"] != user["id"]:
+                                raise PermissionError("Você não pode alterar esta notificação.")
                         cursor = connection.execute(f"DELETE FROM {table} WHERE id = ?", (identifier,))
                         if cursor.rowcount == 0:
                             raise LookupError("Registro não encontrado.")
@@ -644,6 +796,11 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                                  clean_text(payload, "url", limit=500), clean_text(payload, "description", limit=5000), identifier),
                             )
                         elif kind == "notifications":
+                            record = connection.execute("SELECT user_id FROM notifications WHERE id = ?", (identifier,)).fetchone()
+                            if record is None:
+                                raise LookupError("Registro não encontrado.")
+                            if record["user_id"] != user["id"]:
+                                raise PermissionError("Você não pode alterar esta notificação.")
                             connection.execute(
                                 "UPDATE notifications SET read=? WHERE id=?",
                                 (1 if payload.get("read") else 0, identifier),
@@ -659,26 +816,37 @@ class EProjectHandler(SimpleHTTPRequestHandler):
                 self.send_json(404, {"error": "Endpoint não encontrado."})
                 return True
             if len(parts) == 2 and self.command == "POST":
-                identifier = create_record(entity, self.read_json())
+                user = require_user(self)
+                if entity == "projects":
+                    require_role(self, {"ORIENTADOR", "COORDENADOR", "ADMINISTRADOR"})
+                identifier = create_record(entity, self.read_json(), user)
                 self.send_json(201, {"id": identifier})
                 return True
             if len(parts) == 3 and self.command == "PUT":
+                user = require_user(self)
+                if entity == "projects":
+                    require_role(self, {"ORIENTADOR", "COORDENADOR", "ADMINISTRADOR"})
                 identifier = parts[2]
                 if not ID_PATTERN.fullmatch(identifier):
                     raise ValueError("O identificador do registro é inválido.")
-                update_record(entity, identifier, self.read_json())
+                update_record(entity, identifier, self.read_json(), user)
                 self.send_json(200, {"id": identifier})
                 return True
             if len(parts) == 3 and self.command == "DELETE":
+                user = require_user(self)
+                if entity == "projects":
+                    require_role(self, {"ORIENTADOR", "COORDENADOR", "ADMINISTRADOR"})
                 identifier = parts[2]
                 if not ID_PATTERN.fullmatch(identifier):
                     raise ValueError("O identificador do registro é inválido.")
-                delete_record(entity, identifier)
+                delete_record(entity, identifier, user)
                 self.send_json(200, {"id": identifier})
                 return True
             self.send_json(405, {"error": "Método não permitido para este endpoint."})
         except LookupError as exc:
             self.send_json(404, {"error": str(exc)})
+        except AuthenticationError as exc:
+            self.send_json(401, {"error": str(exc)})
         except PermissionError as exc:
             self.send_json(403, {"error": str(exc)})
         except ValueError as exc:

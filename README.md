@@ -1,8 +1,8 @@
 # E-project UFAM
 
-Sistema local de demonstração para organizar projetos acadêmicos, atividades, participantes e compromissos relacionados a programas como PIBIC e PACE.
+Plataforma local de apoio à gestão de projetos acadêmicos de pesquisa e extensão da Universidade Federal do Amazonas.
 
-> **Importante:** este protótipo não é um sistema oficial da UFAM. Não possui login, controle de acesso nem hospedagem multiusuário. O servidor só aceita conexões do próprio computador.
+> O escopo segue o Documento de Especificação do Sistema E-Project, versão 1.0. Este MVP não é um sistema oficial da UFAM e não substitui E-campus, SEI ou os canais institucionais de protocolo.
 
 ## Requisitos
 
@@ -24,15 +24,27 @@ Não abra `index.html` diretamente: o salvamento permanente e a API requerem o s
 
 ## Funcionalidades
 
-- **Visão geral:** indicadores, projetos em destaque, próximas atividades e compromissos.
-- **Projetos:** cadastro, edição, situação, programa, coordenação, período e progresso.
-- **Atividades:** prazos, responsáveis, situação e associação a um projeto.
-- **Participantes:** cadastro de docentes, estudantes e voluntários; o mesmo e-mail não pode ser cadastrado duas vezes.
-- **Agenda:** calendário mensal ou em lista, criação e edição de compromissos, filtros por projeto e tipo e vínculo com atividades.
-- **Equipes de eventos:** vincule responsáveis e convide participantes para cada compromisso.
-- **Lembretes:** notificações opcionais do navegador, mediante autorização. O navegador e o sistema precisam permanecer abertos para que sejam enviados.
-- **Exportações:** relatórios CSV, compromissos no formato `.ics`, relatórios imprimíveis e backup do banco SQLite.
-- **Busca, filtros e exclusões confirmadas** nas telas aplicáveis.
+- Cadastro, login e encerramento de sessão; as senhas são derivadas com `scrypt` e salt aleatório.
+- Dashboard com projetos, tarefas, prazos e indicadores da conta autenticada.
+- CRUD de projetos nos estados Planejado, Em andamento, Concluído, Suspenso e Cancelado, além dos estados antigos preservados; cada projeto tem proprietário e toda tarefa exige um projeto existente.
+- Acesso aos projetos e dados relacionados limitado ao proprietário. A gestão de papéis e o compartilhamento institucional de projetos ainda não estão implementados.
+- Cadastro auxiliar de participantes e agenda de compromissos, mantidos como recursos complementares do protótipo.
+- Relatórios imprimíveis, exportação CSV/ICS e lembretes do navegador enquanto o app estiver aberto.
+
+## Situação no Documento
+
+| Requisito | Situação nesta versão |
+|---|---|
+| RF001–RF004: cadastro, autenticação e sessão | Implementado no MVP local. |
+| RF005: dashboard | Implementado com indicadores disponíveis na base local. |
+| RF006–RF007: criar e consultar projetos | Implementado com isolamento por proprietário. |
+| RF008: atualizar projeto | Implementado para o proprietário. |
+| RF009–RF010: criar e atualizar tarefas | Implementado; a tarefa precisa pertencer a um projeto. |
+| RF011: filtros de tarefas | Busca e filtro por situação implementados; filtros avançados são parciais. |
+| Editais, documentos, PDF, presença, gestão administrativa e sincronização | Planejados ou parciais; não apresentar como concluídos. |
+| Integração E-campus/SEI | Fora do escopo; o app não protocola submissões. |
+
+O app preserva agenda, participantes e exportações como funcionalidades auxiliares da implementação anterior; elas não ampliam o escopo oficial de MVP descrito no documento.
 
 ## Arquitetura
 
@@ -58,7 +70,7 @@ Banco de dados relacional SQLite
 O SQLite é inicializado automaticamente quando o servidor começa:
 
 ```text
-data/eproject.sqlite3
+data/eproject-ufam.sqlite3
 ```
 
 O arquivo do banco é local e está excluído do Git. As tabelas são:
@@ -66,23 +78,28 @@ O arquivo do banco é local e está excluído do Git. As tabelas são:
 | Tabela | Finalidade |
 |---|---|
 | `projects` | Programa, coordenação, unidade, datas, situação e progresso dos projetos. |
-| `participants` | Docentes, estudantes e voluntários, com e-mail e vínculo opcional a um projeto. |
-| `activities` | Atividades, tipo, prazo, situação, projeto e responsável. |
+| `participants` | Docentes, estudantes e voluntários vinculados a um projeto. |
+| `activities` | Tarefas, tipo, prazo, situação, projeto obrigatório e responsável. |
+| `users` / `password_credentials` | Perfil, aceites, estado da conta e credencial derivada separada. |
 | `calendar_events` | Compromissos, horários, local, situação, projeto, atividade e lembrete. |
 | `calendar_event_participants` | Relação entre compromissos e os participantes convidados. |
 
-O esquema utiliza chaves estrangeiras, índices, restrições de situação, validação de períodos e e-mail único. Registros relacionados recebem atualizações ou exclusões compatíveis com essas relações.
+O esquema utiliza chaves estrangeiras, índices, restrições de situação, validação de períodos e e-mail único. A versão do esquema é migrada automaticamente quando o servidor inicia.
 
-### Primeira execução e dados da versão anterior
+### Cadastro e dados locais
 
-Se o banco estiver vazio, o sistema o inicializa com registros **de demonstração**. Dados da versão anterior, caso ainda estejam salvos no navegador, são importados apenas nessa primeira inicialização. O banco já inicializado é a fonte permanente dos dados nas próximas visitas.
+- Não são criadas contas ou projetos de demonstração com senha conhecida.
+- A primeira conta cadastrada recebe o perfil `ORIENTADOR`; os cadastros seguintes recebem `ORIENTANDO`. O auto cadastro não pode conceder perfil de coordenador ou administrador.
+- A sessão usa um token em memória no servidor; reiniciar o servidor invalida os tokens existentes e exige novo login.
+- Se houver dados da versão anterior em `localStorage` e o banco estiver vazio, o primeiro Orientador pode importá-los após autenticar. A chave antiga só é removida depois que a importação termina com sucesso.
+- Na migração, projetos antigos sem proprietário são vinculados à primeira conta. Tarefas antigas sem projeto são preservadas sob um projeto de recuperação chamado **Tarefas sem projeto (dados legados)**.
+- Contas demonstrativas antigas com identificadores e e-mails conhecidos são desativadas pela migração. Nenhum registro de projeto ou tarefa é descartado por essa operação.
+
+O arquivo `data/eproject.sqlite3` já existente tem um esquema de outro sistema e é mantido intacto. O E-Project usa `data/eproject-ufam.sqlite3`, ignorado pelo Git. Para escolher outro caminho, defina `EPROJECT_DATABASE` antes de iniciar o servidor. Antes de migrar uma base E-Project antiga, encerre o servidor e faça uma cópia do arquivo correspondente.
 
 ### Backup e restauração
 
-1. Na página **Relatórios**, escolha **Backup SQLite** para baixar `eproject-backup.sqlite3`.
-2. Guarde o arquivo em local seguro.
-3. Para restaurá-lo, encerre o servidor e substitua `data/eproject.sqlite3` pela cópia desejada.
-4. Inicie o servidor novamente.
+Para cópia local, encerre o servidor e copie `data/eproject-ufam.sqlite3` para um local protegido. A rota `/api/backup` exige perfil `ADMINISTRADOR`; a interface pública não oferece concessão desse papel no MVP. Para restaurar, encerre o servidor e substitua o arquivo pela cópia.
 
 ## API local
 
@@ -90,19 +107,19 @@ Todas as rotas estão disponíveis somente em `127.0.0.1:8000`:
 
 | Rota | Método | Operação |
 |---|---|---|
-| `/api/bootstrap` | `GET` | Carrega projetos, participantes, atividades e agenda. |
-| `/api/events?from=AAAA-MM-DD&to=AAAA-MM-DD` | `GET` | Lista compromissos em um intervalo. |
-| `/api/projects` | `POST` | Cria um projeto. |
-| `/api/projects/{id}` | `PUT`, `DELETE` | Atualiza ou exclui um projeto. |
-| `/api/people` | `POST` | Cria um participante. |
-| `/api/people/{id}` | `PUT`, `DELETE` | Atualiza ou exclui um participante. |
-| `/api/activities` | `POST` | Cria uma atividade. |
-| `/api/activities/{id}` | `PUT`, `DELETE` | Atualiza ou exclui uma atividade. |
-| `/api/events` | `POST` | Agenda um compromisso. |
-| `/api/events/{id}` | `PUT`, `DELETE` | Atualiza ou exclui um compromisso. |
-| `/api/backup` | `GET` | Baixa uma cópia consistente do SQLite. |
+| `/api/register`, `/api/login` | `POST` | Cadastro público e autenticação. |
+| `/api/session`, `/api/logout` | `GET`, `POST` | Consulta e encerra a sessão autenticada. |
+| `/api/bootstrap` | `GET` | Carrega apenas dados acessíveis ao usuário; inclui `projects`, `tasks` e `activities` (alias legado). |
+| `/api/projects` | `POST` | Cria projeto para o proprietário autenticado. |
+| `/api/projects/{id}` | `PUT`, `DELETE` | Atualiza ou exclui projeto próprio. Tarefas vinculadas são removidas junto com o projeto. |
+| `/api/tasks` | `POST` | Cria tarefa obrigatoriamente vinculada a projeto acessível. |
+| `/api/tasks/{id}` | `PUT`, `DELETE` | Atualiza ou exclui tarefa própria. `/api/activities` continua como alias compatível. |
+| `/api/people`, `/api/events` | `POST`, `PUT`, `DELETE` | Operações auxiliares autenticadas, limitadas aos projetos próprios. |
+| `/api/events?from=AAAA-MM-DD&to=AAAA-MM-DD` | `GET` | Lista compromissos dos projetos próprios no intervalo. |
+| `/api/backup` | `GET` | Backup SQLite restrito a `ADMINISTRADOR`. |
+| `/api/import` | `POST` | Importação inicial restrita a `ORIENTADOR` ou `ADMINISTRADOR` e somente com banco vazio. |
 
-Erros de validação retornam mensagens JSON com um código HTTP apropriado. A importação inicial é aceita somente quando o banco ainda está vazio.
+Todas as rotas de dados exigem `Authorization: Bearer <token>`. Apenas cadastro e login são públicos. Erros de validação e autenticação retornam JSON com códigos HTTP apropriados; respostas de login inválido são genéricas.
 
 ## Testes
 
@@ -112,10 +129,10 @@ Execute no PowerShell a partir da pasta do projeto:
 python -m unittest discover -s tests -v
 ```
 
-Os testes utilizam bancos temporários e verificam importação atômica, persistência, operações CRUD, relacionamentos, conflitos, horários inválidos, backup e bloqueio de acesso HTTP direto ao arquivo do banco.
+Os testes utilizam bancos temporários e verificam cadastro/login, sessão obrigatória, isolamento entre contas, importação única, CRUD, vínculo obrigatório das tarefas, migração de dados legados, horários inválidos, backup administrativo e bloqueio de acesso HTTP direto ao banco.
 
 ## Implantação, privacidade e contribuições
 
-Esta versão é adequada para demonstração e desenvolvimento **local**. Não a exponha à rede, não a use com dados pessoais reais e não a considere um serviço oficial. Para uma implantação institucional, planeje autenticação integrada, autorização por perfil, HTTPS, logs, backups protegidos, proteção de dados pessoais, testes e revisão de segurança.
+Esta versão é adequada para demonstração e desenvolvimento **local**. O servidor aceita conexões somente de `127.0.0.1`; não a exponha à rede nem use dados pessoais reais. A autenticação, o isolamento por proprietário e o hash de senha do MVP não substituem revisão de segurança para produção. Permanecem planejados: gestão institucional de papéis, compartilhamento de projetos, notificações remotas, documentos e relatórios PDF, presença, sincronização, observabilidade e integrações oficiais.
 
 O repositório é público, mas o banco de dados e cópias de backup não devem ser enviados ao GitHub.

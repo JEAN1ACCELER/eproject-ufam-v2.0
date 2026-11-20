@@ -9,9 +9,10 @@ CREATE TABLE IF NOT EXISTS projects (
     start_date TEXT,
     end_date TEXT,
     status TEXT NOT NULL DEFAULT 'Planejado'
-        CHECK (status IN ('Planejado', 'Em andamento', 'Pausado', 'Encerrado')),
+        CHECK (status IN ('Planejado', 'Em andamento', 'Concluído', 'Suspenso', 'Cancelado', 'Pausado', 'Encerrado')),
     progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
     description TEXT NOT NULL DEFAULT '',
+    owner_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (start_date IS NULL OR end_date IS NULL OR start_date <= end_date)
@@ -23,7 +24,7 @@ CREATE TABLE IF NOT EXISTS participants (
     email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(email) BETWEEN 1 AND 254),
     role TEXT NOT NULL CHECK (role IN ('Professor(a)', 'Aluno(a)', 'Voluntário(a)')),
     unit TEXT NOT NULL DEFAULT '',
-    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -31,16 +32,30 @@ CREATE TABLE IF NOT EXISTS participants (
 CREATE TABLE IF NOT EXISTS activities (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
-    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     responsible_id TEXT REFERENCES participants(id) ON DELETE SET NULL,
     due_date TEXT,
     status TEXT NOT NULL DEFAULT 'Pendente'
-        CHECK (status IN ('Pendente', 'Em andamento', 'Concluída')),
+        CHECK (status IN ('Pendente', 'Em andamento', 'Concluída', 'Cancelada')),
     type TEXT NOT NULL DEFAULT 'Outro',
     description TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TRIGGER IF NOT EXISTS activities_require_project_insert
+BEFORE INSERT ON activities
+WHEN NEW.project_id IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'Tarefa precisa estar vinculada a um projeto.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS activities_require_project_update
+BEFORE UPDATE OF project_id ON activities
+WHEN NEW.project_id IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'Tarefa precisa estar vinculada a um projeto.');
+END;
 
 CREATE TABLE IF NOT EXISTS calendar_events (
     id TEXT PRIMARY KEY,
