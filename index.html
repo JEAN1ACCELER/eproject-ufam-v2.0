@@ -9,7 +9,8 @@
   <script src="app.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
+  <div class="auth-screen" id="auth-screen" hidden></div>
+  <div class="app-shell" hidden>
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="#" aria-label="E-project, início">
         <span class="brand-mark">E<span>.</span></span>
@@ -20,14 +21,14 @@
       <nav class="main-nav" aria-label="Menu principal">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span>Visão geral</button>
         <button class="nav-item" data-view="projects"><span class="nav-icon">▤</span>Projetos <span class="nav-count" id="project-nav-count">0</span></button>
-        <button class="nav-item" data-view="activities"><span class="nav-icon">◷</span>Atividades</button>
+        <button class="nav-item" data-view="activities"><span class="nav-icon">◷</span>Tarefas</button>
         <button class="nav-item" data-view="calendar"><span class="nav-icon">▦</span>Agenda</button>
         <button class="nav-item" data-view="people"><span class="nav-icon">◎</span>Participantes</button>
         <button class="nav-item" data-view="reports"><span class="nav-icon">▥</span>Relatórios</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="help-card"><strong>Organize sua pesquisa</strong><p>Acompanhe projetos, prazos e entregas em um só lugar.</p></div>
-        <div class="user-card"><div class="avatar avatar-sidebar">AD</div><div><strong>Administrador</strong><small>Coordenação acadêmica</small></div><span class="user-more">•••</span></div>
+        <div class="user-card"><div class="avatar avatar-sidebar" id="sidebar-avatar">EP</div><div class="user-summary"><strong id="user-display-name">Usuário</strong><small id="user-display-role">Perfil</small></div><button class="user-more" data-action="logout" aria-label="Encerrar sessão" title="Encerrar sessão">↪</button></div>
       </div>
     </aside>
 
@@ -38,7 +39,7 @@
         <div class="topbar-actions">
           <label class="search-box"><span>⌕</span><input id="global-search" type="search" placeholder="Buscar..." aria-label="Buscar"></label>
           <button class="icon-button notification-button" data-action="enable-reminders" aria-label="Ativar lembretes do calendário" title="Ativar lembretes do calendário">!</button>
-          <div class="avatar avatar-top">AD</div>
+          <div class="avatar avatar-top" id="topbar-avatar">EP</div>
         </div>
       </header>
       <section class="page-content" id="page-content"></section>

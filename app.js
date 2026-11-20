@@ -6,34 +6,12 @@ const dateOffset = (days) => {
 };
 const localDateTime = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 
-const seedData = {
-  projects: [
-    { id: "p1", name: "Monitoramento da qualidade da água no Alto Solimões", program: "PIBIC", coordinator: "Profa. Exemplo 1", unit: "Instituto de Ciências Exatas", start: "2026-03-01", end: "2027-02-28", status: "Em andamento", progress: 68, description: "Análise de parâmetros físico-químicos em comunidades ribeirinhas." },
-    { id: "p2", name: "Saberes tradicionais e educação ambiental", program: "PACE", coordinator: "Prof. Exemplo 2", unit: "Faculdade de Educação", start: "2026-02-01", end: "2026-12-15", status: "Em andamento", progress: 42, description: "Ações de educação ambiental construídas com comunidades locais." },
-    { id: "p3", name: "Acervo digital de narrativas amazônicas", program: "PIBIC", coordinator: "Profa. Exemplo 3", unit: "Instituto de Ciências Humanas", start: "2026-04-10", end: "2027-03-31", status: "Planejado", progress: 15, description: "Organização e preservação digital de narrativas da região." },
-    { id: "p4", name: "Tecnologias sociais para agricultura familiar", program: "Extensão", coordinator: "Prof. Exemplo 4", unit: "Faculdade de Ciências Agrárias", start: "2025-08-01", end: "2026-07-30", status: "Em andamento", progress: 82, description: "Desenvolvimento participativo de soluções para agricultura familiar." }
-  ],
-  people: [
-    { id: "u1", name: "Docente Demonstrativa 1", email: "docente1@example.invalid", role: "Professor(a)", unit: "Instituto de Ciências Exatas", projectId: "p1" },
-    { id: "u2", name: "Estudante Demonstrativo 1", email: "estudante1@example.invalid", role: "Aluno(a)", unit: "Instituto de Ciências Exatas", projectId: "p1" },
-    { id: "u3", name: "Voluntária Demonstrativa 1", email: "voluntaria1@example.invalid", role: "Voluntário(a)", unit: "Faculdade de Educação", projectId: "p2" },
-    { id: "u4", name: "Docente Demonstrativo 2", email: "docente2@example.invalid", role: "Professor(a)", unit: "Faculdade de Educação", projectId: "p2" },
-    { id: "u5", name: "Estudante Demonstrativo 2", email: "estudante2@example.invalid", role: "Aluno(a)", unit: "Instituto de Ciências Humanas", projectId: "p3" },
-    { id: "u6", name: "Docente Demonstrativo 3", email: "docente3@example.invalid", role: "Professor(a)", unit: "Instituto de Ciências Humanas", projectId: "p3" }
-  ],
-  activities: [
-    { id: "a1", title: "Coleta de amostras — comunidade do Lago", projectId: "p1", responsibleId: "u2", dueDate: dateOffset(2), status: "Em andamento", type: "Pesquisa", description: "Realizar coleta e registrar coordenadas das amostras." },
-    { id: "a2", title: "Entrega do relatório parcial", projectId: "p1", responsibleId: "u1", dueDate: dateOffset(7), status: "Pendente", type: "Relatório", description: "Consolidar resultados e anexar evidências do período." },
-    { id: "a3", title: "Oficina de educação ambiental", projectId: "p2", responsibleId: "u3", dueDate: dateOffset(12), status: "Pendente", type: "Extensão", description: "Preparar materiais para atividade com a comunidade." },
-    { id: "a4", title: "Catalogação das entrevistas", projectId: "p3", responsibleId: "u5", dueDate: dateOffset(18), status: "Pendente", type: "Pesquisa", description: "Revisar metadados e organizar arquivos do acervo." },
-    { id: "a5", title: "Reunião de acompanhamento", projectId: "p4", responsibleId: "u4", dueDate: dateOffset(-2), status: "Concluída", type: "Reunião", description: "Avaliar cronograma e próximos passos do projeto." }
-  ],
-  events: []
-};
-
 const state = {
-  data: { projects: [], people: [], activities: [], events: [] },
+  data: { projects: [], people: [], activities: [], events: [], edital: [], documents: [], attendance: [], notifications: [], users: [] },
   ready: false,
+  user: null,
+  authMode: "login",
+  token: localStorage.getItem("eproject-session-token") || "",
   view: "dashboard",
   calendarMonth: new Date(today.getFullYear(), today.getMonth(), 1),
   calendarMode: "month",
@@ -44,16 +22,23 @@ const state = {
 const views = {
   dashboard: "Visão geral",
   projects: "Projetos",
-  activities: "Atividades",
+  activities: "Tarefas",
   people: "Participantes",
   calendar: "Agenda",
+  edital: "Editais",
+  documents: "Documentos",
+  attendance: "Presença",
+  notifications: "Notificações",
+  administration: "Administração",
   reports: "Relatórios"
 };
 
 async function apiRequest(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...options.headers },
+    headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
   let result = {};
@@ -62,7 +47,11 @@ async function apiRequest(path, options = {}) {
   } catch (error) {
     if (!response.ok) throw new Error(`O servidor respondeu com erro HTTP ${response.status}.`);
   }
-  if (!response.ok) throw new Error(result.error || `A solicitação falhou (HTTP ${response.status}).`);
+  if (!response.ok) {
+    const error = new Error(result.error || `A solicitação falhou (HTTP ${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
   return result;
 }
 
@@ -72,51 +61,121 @@ function isApplicationData(value) {
 
 async function refreshData() {
   state.data = await apiRequest("/api/bootstrap");
-  if (!Array.isArray(state.data.events)) state.data.events = [];
+  for (const key of ["events", "edital", "documents", "attendance", "notifications", "users"]) {
+    if (!Array.isArray(state.data[key])) state.data[key] = [];
+  }
   if (state.ready) render();
 }
 
+function renderAuth(message = "") {
+  document.querySelector(".app-shell").hidden = true;
+  const root = document.getElementById("auth-screen");
+  root.hidden = false;
+  const registering = state.authMode === "register";
+  root.innerHTML = `
+    <section class="auth-panel" aria-labelledby="auth-title">
+      <a class="brand auth-brand" href="#" aria-label="E-project UFAM">
+        <span class="brand-mark">E<span>.</span></span>
+        <span class="brand-copy"><strong>E-project</strong><small>UFAM · ICET</small></span>
+      </a>
+      <p class="eyebrow">GESTÃO DE PROJETOS ACADÊMICOS</p>
+      <h1 id="auth-title">${registering ? "Crie sua conta" : "Acesse seu espaço"}</h1>
+      <p class="auth-description">${registering ? "Organize projetos de pesquisa e extensão em um só lugar." : "Entre para acompanhar projetos, tarefas e prazos autorizados."}</p>
+      ${message ? `<p class="auth-error" role="alert">${escapeHtml(message)}</p>` : ""}
+      <form class="auth-form" data-auth-form="${registering ? "register" : "login"}">
+        ${registering ? `<label>Nome completo<input name="name" autocomplete="name" maxlength="120" required></label>` : ""}
+        <label>E-mail institucional<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+        <label>Senha<input name="password" type="password" autocomplete="${registering ? "new-password" : "current-password"}" minlength="8" maxlength="128" required></label>
+        ${registering ? `<div class="auth-consents"><label><input name="acceptedTerms" type="checkbox" required> Aceito os termos de uso</label><label><input name="acceptedPrivacy" type="checkbox" required> Aceito a política de privacidade</label></div><p class="auth-note">O primeiro cadastro local recebe o perfil Orientador; os seguintes, Orientando. Perfis administrativos não podem ser definidos no auto cadastro.</p>` : ""}
+        <button class="primary-button auth-submit" type="submit">${registering ? "Criar conta" : "Entrar"}</button>
+      </form>
+      <p class="auth-switch">${registering ? "Já possui acesso?" : "Ainda não possui conta?"} <button type="button" class="text-button" data-action="toggle-auth-mode">${registering ? "Fazer login" : "Cadastrar usuário"}</button></p>
+      <p class="auth-footnote">Protótipo local de apoio. Não substitui os canais oficiais de submissão da UFAM.</p>
+    </section>`;
+  root.querySelector("input")?.focus();
+}
+
 async function startApplication() {
+  if (!state.token) {
+    renderAuth();
+    return;
+  }
   try {
+    const session = await apiRequest("/api/session");
+    state.user = session.user;
+    let migrationError = "";
     const saved = await apiRequest("/api/bootstrap");
     const isEmpty = ["projects", "people", "activities", "events"].every((key) => saved[key]?.length === 0);
-    if (isEmpty) {
-      let legacy = null;
+    if (isEmpty && ["ORIENTADOR", "ADMINISTRADOR"].includes(state.user.role)) {
       try {
         const previous = localStorage.getItem("eproject-ufam-data-v1");
-        if (previous) legacy = JSON.parse(previous);
+        const legacy = previous ? JSON.parse(previous) : null;
+        if (isApplicationData(legacy)) {
+          await apiRequest("/api/import", {
+            method: "POST",
+            body: { ...legacy, events: Array.isArray(legacy.events) ? legacy.events : [] }
+          });
+          localStorage.removeItem("eproject-ufam-data-v1");
+        }
       } catch (error) {
-        console.error("Os dados locais da versão anterior não puderam ser lidos.", error);
-      }
-      const initialData = isApplicationData(legacy) ? { ...legacy, events: legacy.events || [] } : seedData;
-      try {
-        await apiRequest("/api/import", { method: "POST", body: initialData });
-        localStorage.removeItem("eproject-ufam-data-v1");
-        toast(isApplicationData(legacy)
-          ? "Seus cadastros anteriores foram migrados para o banco de dados."
-          : "Banco criado com dados de demonstração. Você já pode cadastrar seus projetos.");
-      } catch (error) {
-        const latest = await apiRequest("/api/bootstrap");
-        const remainsEmpty = ["projects", "people", "activities", "events"].every((key) => latest[key]?.length === 0);
-        if (remainsEmpty) throw error;
+        migrationError = `Os dados locais anteriores não foram importados: ${error.message}`;
       }
     }
     await refreshData();
     state.ready = true;
+    document.getElementById("auth-screen").hidden = true;
+    document.querySelector(".app-shell").hidden = false;
     render();
+    if (migrationError) toast(migrationError, true);
     checkReminders();
     window.setInterval(checkReminders, 60_000);
   } catch (error) {
+    if (error.status === 401) {
+      state.token = "";
+      state.user = null;
+      localStorage.removeItem("eproject-session-token");
+      renderAuth("Sua sessão expirou. Entre novamente.");
+      return;
+    }
+    if (!state.user) {
+      renderAuth("Não foi possível conectar ao servidor local. Inicie com python server.py e tente novamente.");
+      return;
+    }
     console.error("Não foi possível inicializar a aplicação.", error);
-    document.getElementById("page-content").innerHTML = `<section class="panel"><div class="panel-body">${emptyState("Não foi possível conectar ao banco de dados", "Inicie o servidor local com python server.py e atualize a página.")}<p class="database-error">${escapeHtml(error.message)}</p><button class="primary-button" data-action="retry-connection">Tentar novamente</button></div></section>`;
-    toast(`Erro ao conectar: ${error.message}`, true);
+    document.getElementById("page-content").innerHTML = `<section class="panel"><div class="panel-body">${emptyState("Não foi possível carregar os dados", "Tente novamente quando o servidor local estiver disponível.")}<button class="primary-button" data-action="retry-connection">Tentar novamente</button></div></section>`;
   }
+}
+
+async function logout() {
+  try {
+    await apiRequest("/api/logout", { method: "POST" });
+  } catch (error) {
+    console.error("Não foi possível encerrar a sessão no servidor.", error);
+  }
+  state.token = "";
+  state.user = null;
+  state.ready = false;
+  localStorage.removeItem("eproject-session-token");
+  renderAuth();
 }
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   })[char]);
+}
+
+function roleLabel(role) {
+  return ({
+    ORIENTADOR: "Orientador/Docente",
+    ORIENTANDO: "Orientando/Bolsista",
+    COORDENADOR: "Coordenador",
+    ADMINISTRADOR: "Administrador"
+  })[role] || "Usuário";
+}
+
+function canManageProjects() {
+  return ["ORIENTADOR", "COORDENADOR", "ADMINISTRADOR"].includes(state.user?.role);
 }
 
 function formatDate(value) {
@@ -141,6 +200,9 @@ function statusClass(status) {
     "Planejado": "planejado",
     "Pausado": "pausado",
     "Encerrado": "encerrado",
+    "Concluído": "concluida",
+    "Suspenso": "pausado",
+    "Cancelada": "cancelado",
     "Atrasada": "atrasada",
     "Realizado": "concluida",
     "Cancelado": "cancelado"
@@ -165,6 +227,15 @@ function personOptions(selected = "") {
 }
 
 function render() {
+  if (!state.user) {
+    renderAuth();
+    return;
+  }
+  const initials = state.user.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toLocaleUpperCase("pt-BR");
+  document.getElementById("user-display-name").textContent = state.user.name;
+  document.getElementById("user-display-role").textContent = roleLabel(state.user.role);
+  document.getElementById("sidebar-avatar").textContent = initials;
+  document.getElementById("topbar-avatar").textContent = initials;
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.view);
   });
@@ -190,12 +261,13 @@ function render() {
 
 function renderDashboard() {
   const activeProjects = state.data.projects.filter((project) => project.status === "Em andamento").length;
-  const pendingActivities = state.data.activities.filter((item) => item.status !== "Concluída").length;
+  const pendingActivities = state.data.activities.filter((item) => !["Concluída", "Cancelada"].includes(item.status)).length;
   const peopleCount = state.data.people.length;
   const completed = state.data.activities.filter((item) => item.status === "Concluída").length;
-  const completionRate = state.data.activities.length ? Math.round(completed / state.data.activities.length * 100) : 0;
+  const activeTasks = state.data.activities.filter((item) => item.status !== "Cancelada").length;
+  const completionRate = activeTasks ? Math.round(completed / activeTasks * 100) : 0;
   const upcoming = [...state.data.activities]
-    .filter((item) => item.status !== "Concluída")
+    .filter((item) => !["Concluída", "Cancelada"].includes(item.status))
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
     .slice(0, 4);
   const projects = [...state.data.projects].slice(0, 4);
@@ -210,13 +282,13 @@ function renderDashboard() {
     <div class="page-heading">
       <div><p class="eyebrow">${escapeHtml(dashboardDate)}</p>
         <h1>Olá, equipe acadêmica</h1><p class="heading-subtitle">Acompanhe o andamento das atividades e projetos da UFAM.</p></div>
-      <div class="button-row"><button class="secondary-button" data-action="export-summary">↧ Exportar resumo</button><button class="primary-button" data-action="add-project"><span class="plus">＋</span>Novo projeto</button></div>
+      <div class="button-row"><button class="secondary-button" data-action="export-summary">↧ Exportar resumo</button>${canManageProjects() ? `<button class="primary-button" data-action="add-project"><span class="plus">＋</span>Novo projeto</button>` : ""}</div>
     </div>
     <div class="stats-grid">
       ${statCard("Projetos ativos", activeProjects, `de ${state.data.projects.length} projetos cadastrados`, "▤")}
-      ${statCard("Atividades pendentes", pendingActivities, "Acompanhe prazos e entregas", "◷")}
+      ${statCard("Tarefas pendentes", pendingActivities, "Acompanhe prazos e entregas", "◷")}
       ${statCard("Participantes", peopleCount, "Professores, alunos e voluntários", "◎")}
-      ${statCard("Atividades concluídas", `${completionRate}%`, `${completed} de ${state.data.activities.length} atividades`, "✓")}
+      ${statCard("Tarefas concluídas", `${completionRate}%`, `${completed} de ${state.data.activities.length} tarefas`, "✓")}
     </div>
     <div class="dashboard-grid">
       <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Projetos em destaque</h2><p class="panel-subtitle">Visão rápida do andamento dos projetos</p></div><button class="text-button" data-view="projects">Ver todos →</button></div>
@@ -224,7 +296,7 @@ function renderDashboard() {
           <div class="project-row"><div><div class="project-name">${escapeHtml(project.name)}</div><div class="project-meta">${escapeHtml(project.program)} · ${escapeHtml(project.coordinator)}</div></div>
             <div class="progress-wrap"><div class="progress-track"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(project.progress) || 0))}%"></div></div><span class="progress-value">${escapeHtml(project.progress)}%</span></div>${statusPill(project.status)}</div>`).join("") : emptyState("Nenhum projeto cadastrado", "Cadastre um projeto para acompanhar seu progresso.")}</div></div>
       </section>
-      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Próximas atividades</h2><p class="panel-subtitle">Prazos e compromissos da equipe</p></div><button class="text-button" data-view="calendar">Abrir agenda →</button></div>
+      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Próximas tarefas</h2><p class="panel-subtitle">Prazos e compromissos da equipe</p></div><button class="text-button" data-view="calendar">Abrir agenda →</button></div>
         <div class="panel-body"><div class="activity-list">${upcoming.length ? upcoming.map(activityRow).join("") : emptyState("Tudo em dia!", "Não há atividades pendentes.")}</div>
           <div class="dashboard-events-heading"><h3 class="panel-title">Compromissos agendados</h3><button class="text-button" data-action="add-event">Agendar</button></div>
           <div class="activity-list">${upcomingEvents.length ? upcomingEvents.map(eventDashboardRow).join("") : emptyState("Sem compromissos próximos", "Adicione uma reunião ou uma atividade de campo.")}</div>
@@ -302,7 +374,7 @@ function renderCalendar() {
       </div>
       ${state.calendarMode === "month" ? `<div class="calendar-grid"><div class="calendar-weekday">Seg</div><div class="calendar-weekday">Ter</div><div class="calendar-weekday">Qua</div><div class="calendar-weekday">Qui</div><div class="calendar-weekday">Sex</div><div class="calendar-weekday">Sáb</div><div class="calendar-weekday">Dom</div>${days}</div>` :
       `<div class="agenda-list">${list.length ? list.map((item) => item.kind === "event" ? eventListRow(item) : activityListRow(item)).join("") : emptyState("Nenhum compromisso ou prazo neste mês", "Use “Novo compromisso” para agendar uma reunião, orientação ou atividade.")}</div>`}
-      <div class="calendar-footer">${events.length} ${events.length === 1 ? "compromisso" : "compromissos"} e ${activities.length} ${activities.length === 1 ? "prazo de atividade" : "prazos de atividades"} neste mês · Os lembretes do navegador funcionam enquanto a aplicação estiver aberta.</div>
+      <div class="calendar-footer">${events.length} ${events.length === 1 ? "compromisso" : "compromissos"} e ${activities.length} ${activities.length === 1 ? "prazo de tarefa" : "prazos de tarefas"} neste mês · Os lembretes do navegador funcionam enquanto a aplicação estiver aberta.</div>
     </section>`;
 }
 
@@ -323,10 +395,10 @@ function renderProjects() {
     (state.filters.projectStatus === "Todos" || project.status === state.filters.projectStatus) &&
     matchesSearch(project.name, project.program, project.coordinator, project.unit, project.status)
   );
-  return `<div class="page-heading"><div><p class="eyebrow">PESQUISA, EXTENSÃO E INOVAÇÃO</p><h1>Projetos acadêmicos</h1><p class="heading-subtitle">Organize iniciativas como PIBIC, PACE e projetos de extensão.</p></div><button class="primary-button" data-action="add-project"><span class="plus">＋</span>Novo projeto</button></div>
-    <div class="toolbar"><select class="filter-select" data-filter="projectStatus" aria-label="Filtrar por situação"><option>Todos</option><option>Em andamento</option><option>Planejado</option><option>Encerrado</option><option>Pausado</option></select><span class="toolbar-spacer"></span><span class="heading-subtitle">${projects.length} ${projects.length === 1 ? "projeto" : "projetos"}</span></div>
+  return `<div class="page-heading"><div><p class="eyebrow">PESQUISA, EXTENSÃO E INOVAÇÃO</p><h1>Projetos acadêmicos</h1><p class="heading-subtitle">Organize iniciativas como PIBIC, PACE e projetos de extensão.</p></div>${canManageProjects() ? `<button class="primary-button" data-action="add-project"><span class="plus">＋</span>Novo projeto</button>` : ""}</div>
+    <div class="toolbar"><select class="filter-select" data-filter="projectStatus" aria-label="Filtrar por situação"><option>Todos</option><option>Em andamento</option><option>Planejado</option><option>Concluído</option><option>Suspenso</option><option>Cancelado</option><option>Encerrado</option><option>Pausado</option></select><span class="toolbar-spacer"></span><span class="heading-subtitle">${projects.length} ${projects.length === 1 ? "projeto" : "projetos"}</span></div>
     <div class="content-card table-wrap"><table><thead><tr><th>Projeto</th><th>Programa</th><th>Coordenação</th><th>Período</th><th>Progresso</th><th>Situação</th><th></th></tr></thead><tbody>
-      ${projects.length ? projects.map((project) => `<tr><td><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.unit)}</small></td><td>${escapeHtml(project.program)}</td><td>${escapeHtml(project.coordinator)}</td><td>${formatDate(project.start)} – ${formatDate(project.end)}</td><td><div class="progress-wrap"><div class="progress-track"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(project.progress) || 0))}%"></div></div><span class="progress-value">${escapeHtml(project.progress)}%</span></div></td><td>${statusPill(project.status)}</td><td><div class="table-actions"><button class="small-action" data-action="edit-project" data-id="${escapeHtml(project.id)}">Editar</button><button class="small-action delete" data-action="delete-project" data-id="${escapeHtml(project.id)}">Excluir</button></div></td></tr>`).join("") : `<tr><td colspan="7" class="table-empty"><strong>Nenhum projeto encontrado</strong><span>Ajuste a busca ou cadastre um novo projeto.</span></td></tr>`}
+      ${projects.length ? projects.map((project) => `<tr><td><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.unit)}</small></td><td>${escapeHtml(project.program)}</td><td>${escapeHtml(project.coordinator)}</td><td>${formatDate(project.start)} – ${formatDate(project.end)}</td><td><div class="progress-wrap"><div class="progress-track"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(project.progress) || 0))}%"></div></div><span class="progress-value">${escapeHtml(project.progress)}%</span></div></td><td>${statusPill(project.status)}</td><td>${canManageProjects() ? `<div class="table-actions"><button class="small-action" data-action="edit-project" data-id="${escapeHtml(project.id)}">Editar</button><button class="small-action delete" data-action="delete-project" data-id="${escapeHtml(project.id)}">Excluir</button></div>` : ""}</td></tr>`).join("") : `<tr><td colspan="7" class="table-empty"><strong>Nenhum projeto encontrado</strong><span>Ajuste a busca ou cadastre um novo projeto.</span></td></tr>`}
     </tbody></table></div>`;
 }
 
@@ -335,10 +407,10 @@ function renderActivities() {
     (state.filters.activityStatus === "Todos" || activity.status === state.filters.activityStatus) &&
     matchesSearch(activity.title, activity.type, activity.status, projectById(activity.projectId)?.name, personById(activity.responsibleId)?.name)
   ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  return `<div class="page-heading"><div><p class="eyebrow">CRONOGRAMA E ENTREGAS</p><h1>Atividades</h1><p class="heading-subtitle">Distribua responsabilidades e acompanhe os prazos dos projetos.</p></div><button class="primary-button" data-action="add-activity"><span class="plus">＋</span>Nova atividade</button></div>
-    <div class="toolbar"><select class="filter-select" data-filter="activityStatus" aria-label="Filtrar por situação"><option>Todos</option><option>Pendente</option><option>Em andamento</option><option>Concluída</option></select><span class="toolbar-spacer"></span><span class="heading-subtitle">${activities.length} ${activities.length === 1 ? "atividade" : "atividades"}</span></div>
-    <div class="content-card table-wrap"><table><thead><tr><th>Atividade</th><th>Projeto</th><th>Responsável</th><th>Tipo</th><th>Prazo</th><th>Situação</th><th></th></tr></thead><tbody>
-      ${activities.length ? activities.map((activity) => `<tr><td><strong>${escapeHtml(activity.title)}</strong><small>${escapeHtml(activity.description || "")}</small></td><td>${escapeHtml(projectById(activity.projectId)?.name || "Projeto removido")}</td><td>${escapeHtml(personById(activity.responsibleId)?.name || "Não atribuído")}</td><td>${escapeHtml(activity.type)}</td><td>${formatDate(activity.dueDate)}</td><td>${statusPill(activity.status)}</td><td><div class="table-actions"><button class="small-action" data-action="edit-activity" data-id="${escapeHtml(activity.id)}">Editar</button><button class="small-action delete" data-action="delete-activity" data-id="${escapeHtml(activity.id)}">Excluir</button></div></td></tr>`).join("") : `<tr><td colspan="7" class="table-empty"><strong>Nenhuma atividade encontrada</strong><span>Ajuste a busca ou cadastre uma nova atividade.</span></td></tr>`}
+  return `<div class="page-heading"><div><p class="eyebrow">CRONOGRAMA E ENTREGAS</p><h1>Tarefas</h1><p class="heading-subtitle">Distribua responsabilidades e acompanhe os prazos dos projetos.</p></div><button class="primary-button" data-action="add-activity"><span class="plus">＋</span>Nova tarefa</button></div>
+    <div class="toolbar"><select class="filter-select" data-filter="activityStatus" aria-label="Filtrar por situação"><option>Todos</option><option>Pendente</option><option>Em andamento</option><option>Concluída</option><option>Cancelada</option></select><span class="toolbar-spacer"></span><span class="heading-subtitle">${activities.length} ${activities.length === 1 ? "tarefa" : "tarefas"}</span></div>
+    <div class="content-card table-wrap"><table><thead><tr><th>Tarefa</th><th>Projeto</th><th>Responsável</th><th>Tipo</th><th>Prazo</th><th>Situação</th><th></th></tr></thead><tbody>
+      ${activities.length ? activities.map((activity) => `<tr><td><strong>${escapeHtml(activity.title)}</strong><small>${escapeHtml(activity.description || "")}</small></td><td>${escapeHtml(projectById(activity.projectId)?.name || "Projeto removido")}</td><td>${escapeHtml(personById(activity.responsibleId)?.name || "Não atribuído")}</td><td>${escapeHtml(activity.type)}</td><td>${formatDate(activity.dueDate)}</td><td>${statusPill(activity.status)}</td><td><div class="table-actions"><button class="small-action" data-action="edit-activity" data-id="${escapeHtml(activity.id)}">Editar</button><button class="small-action delete" data-action="delete-activity" data-id="${escapeHtml(activity.id)}">Excluir</button></div></td></tr>`).join("") : `<tr><td colspan="7" class="table-empty"><strong>Nenhuma tarefa encontrada</strong><span>Ajuste a busca ou cadastre uma nova tarefa.</span></td></tr>`}
     </tbody></table></div>`;
 }
 
@@ -358,16 +430,17 @@ function renderReports() {
   const projects = state.data.projects;
   const activities = state.data.activities;
   const completed = activities.filter((activity) => activity.status === "Concluída").length;
-  const overdue = activities.filter((activity) => activity.status !== "Concluída" && activity.dueDate < dateOffset(0)).length;
+  const activeTasks = activities.filter((activity) => activity.status !== "Cancelada").length;
+  const overdue = activities.filter((activity) => !["Concluída", "Cancelada"].includes(activity.status) && activity.dueDate < dateOffset(0)).length;
   const programs = [...new Set(projects.map((project) => project.program))];
   const programCounts = programs.map((name) => ({ name, count: projects.filter((project) => project.program === name).length }));
   const maxProgram = Math.max(1, ...programCounts.map((item) => item.count));
   const roles = ["Professor(a)", "Aluno(a)", "Voluntário(a)"];
-  return `<div class="page-heading"><div><p class="eyebrow">ACOMPANHAMENTO E PRESTAÇÃO DE CONTAS</p><h1>Relatórios</h1><p class="heading-subtitle">Resumo da execução dos projetos e das atividades cadastradas.</p></div><div class="button-row"><button class="secondary-button" data-action="download-backup">Backup SQLite</button><button class="secondary-button" data-action="export-csv">↧ Exportar CSV</button><button class="primary-button" data-action="print-report">▤ Imprimir relatório</button></div></div>
+  return `<div class="page-heading"><div><p class="eyebrow">ACOMPANHAMENTO E PRESTAÇÃO DE CONTAS</p><h1>Relatórios</h1><p class="heading-subtitle">Resumo da execução dos projetos e das tarefas cadastradas.</p></div><div class="button-row">${state.user.role === "ADMINISTRADOR" ? `<button class="secondary-button" data-action="download-backup">Backup SQLite</button>` : ""}<button class="secondary-button" data-action="export-csv">↧ Exportar CSV</button><button class="primary-button" data-action="print-report">▤ Imprimir relatório</button></div></div>
     <div class="report-grid">
       ${reportMetric("Projetos cadastrados", projects.length, "Iniciativas acompanhadas na plataforma", "▤")}
-      ${reportMetric("Atividades concluídas", `${completed} / ${activities.length}`, `${activities.length ? Math.round(completed / activities.length * 100) : 0}% das atividades registradas`, "✓")}
-      ${reportMetric("Atividades em atraso", overdue, overdue ? "Verifique os prazos com as equipes" : "Nenhuma atividade vencida", "◷")}
+      ${reportMetric("Tarefas concluídas", `${completed} / ${activeTasks}`, `${activeTasks ? Math.round(completed / activeTasks * 100) : 0}% das tarefas ativas`, "✓")}
+      ${reportMetric("Tarefas em atraso", overdue, overdue ? "Verifique os prazos com as equipes" : "Nenhuma tarefa vencida", "◷")}
     </div>
     <div class="report-bottom">
       <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Projetos por programa</h2><p class="panel-subtitle">Distribuição das iniciativas cadastradas</p></div></div><div class="panel-body"><div class="bar-chart">
@@ -416,11 +489,13 @@ function openModal({ title, subtitle, fields, values = {}, entity, id = "" }) {
   if (firstInput) firstInput.focus();
 }
 
-function projectFields() {
+function projectFields(legacyStatus = "") {
+  const statuses = ["Planejado", "Em andamento", "Concluído", "Suspenso", "Cancelado"];
+  if (["Pausado", "Encerrado"].includes(legacyStatus)) statuses.push(legacyStatus);
   return [
     { name: "name", label: "Nome do projeto", full: true, placeholder: "Título da iniciativa" },
     { name: "program", label: "Programa", type: "select", options: ["PIBIC", "PIBITI", "PACE", "Extensão", "PET", "Outro"] },
-    { name: "status", label: "Situação", type: "select", options: ["Planejado", "Em andamento", "Pausado", "Encerrado"], default: "Planejado" },
+    { name: "status", label: "Situação", type: "select", options: statuses, default: "Planejado" },
     { name: "coordinator", label: "Professor(a) responsável" },
     { name: "unit", label: "Unidade acadêmica" },
     { name: "start", label: "Data de início", type: "date" },
@@ -432,11 +507,11 @@ function projectFields() {
 
 function activityFields() {
   return [
-    { name: "title", label: "Nome da atividade", full: true, placeholder: "Ex.: Entrega do relatório parcial" },
+    { name: "title", label: "Título da tarefa", full: true, placeholder: "Ex.: Entrega do relatório parcial" },
     { name: "projectId", label: "Projeto", type: "select" },
     { name: "responsibleId", label: "Responsável", type: "select", required: false },
     { name: "type", label: "Tipo", type: "select", options: ["Pesquisa", "Extensão", "Relatório", "Reunião", "Formação", "Outro"] },
-    { name: "status", label: "Situação", type: "select", options: ["Pendente", "Em andamento", "Concluída"], default: "Pendente" },
+    { name: "status", label: "Situação", type: "select", options: ["Pendente", "Em andamento", "Concluída", "Cancelada"], default: "Pendente" },
     { name: "dueDate", label: "Prazo", type: "date" },
     { name: "description", label: "Descrição", type: "textarea", full: true, required: false, placeholder: "Detalhes e entregáveis esperados" }
   ];
@@ -475,8 +550,8 @@ function showEntityModal(entity, id = "") {
   const collection = state.data[entity];
   const current = id ? collection.find((item) => item.id === id) : null;
   const configs = {
-    projects: { title: current ? "Editar projeto" : "Novo projeto", subtitle: "Preencha as informações para acompanhamento acadêmico.", fields: projectFields() },
-    activities: { title: current ? "Editar atividade" : "Nova atividade", subtitle: "Defina o prazo, o projeto e a pessoa responsável.", fields: activityFields() },
+    projects: { title: current ? "Editar projeto" : "Novo projeto", subtitle: "Preencha as informações para acompanhamento acadêmico.", fields: projectFields(current?.status) },
+    activities: { title: current ? "Editar tarefa" : "Nova tarefa", subtitle: "Defina o prazo, o projeto e a pessoa responsável.", fields: activityFields() },
     people: { title: current ? "Editar participante" : "Novo participante", subtitle: "Cadastre um integrante e vincule-o a um projeto.", fields: personFields() },
     events: { title: current ? "Editar compromisso" : "Novo compromisso", subtitle: "Agende reuniões, orientações e atividades dos projetos.", fields: eventFields(current || {}) }
   };
@@ -510,10 +585,11 @@ function toast(message, error = false) {
 async function deleteRecord(entity, id) {
   const record = state.data[entity].find((item) => item.id === id);
   if (!record) return;
-  const names = { projects: "projeto", activities: "atividade", people: "participante", events: "compromisso" };
+  const names = { projects: "projeto", activities: "tarefa", people: "participante", events: "compromisso" };
   if (!window.confirm(`Deseja excluir ${names[entity]} "${record.name || record.title}"?`)) return;
   try {
-    await apiRequest(`/api/${entity}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const apiEntity = entity === "activities" ? "tasks" : entity;
+    await apiRequest(`/api/${apiEntity}/${encodeURIComponent(id)}`, { method: "DELETE" });
     document.getElementById("modal-root").innerHTML = "";
     await refreshData();
     toast(`${names[entity][0].toLocaleUpperCase("pt-BR") + names[entity].slice(1)} excluído(a).`);
@@ -598,7 +674,7 @@ function downloadCalendarIcs() {
 
 async function downloadDatabaseBackup() {
   try {
-    const response = await fetch("/api/backup");
+    const response = await fetch("/api/backup", { headers: { Authorization: `Bearer ${state.token}` } });
     if (!response.ok) {
       let message = `Não foi possível gerar o backup (HTTP ${response.status}).`;
       try {
@@ -633,6 +709,35 @@ function enableReminders() {
       toast("Permita as notificações nas configurações do navegador para ativar os lembretes.", true);
     }
   }).catch((error) => toast(`Não foi possível ativar os lembretes: ${error.message}`, true));
+}
+
+async function submitAuthForm(form) {
+  const button = form.querySelector('[type="submit"]');
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "Aguarde...";
+  const values = Object.fromEntries(new FormData(form).entries());
+  try {
+    if (form.dataset.authForm === "register") {
+      values.acceptedTerms = form.elements.acceptedTerms.checked;
+      values.acceptedPrivacy = form.elements.acceptedPrivacy.checked;
+      await apiRequest("/api/register", { method: "POST", body: values });
+    }
+    const session = await apiRequest("/api/login", {
+      method: "POST",
+      body: { email: values.email, password: values.password }
+    });
+    state.token = session.token;
+    state.authMode = "login";
+    localStorage.setItem("eproject-session-token", state.token);
+    await startApplication();
+  } catch (error) {
+    state.authMode = form.dataset.authForm;
+    renderAuth(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
 }
 
 function checkReminders() {
@@ -676,6 +781,15 @@ document.addEventListener("click", (event) => {
     return;
   }
   const { action, id } = target.dataset;
+  if (action === "toggle-auth-mode") {
+    state.authMode = state.authMode === "login" ? "register" : "login";
+    renderAuth();
+    return;
+  }
+  if (action === "logout") {
+    void logout();
+    return;
+  }
   if (action === "retry-connection") void startApplication();
   if (action === "add-project") showEntityModal("projects");
   else if (action === "add-activity") {
@@ -707,6 +821,12 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("submit", (event) => {
+  const authForm = event.target.closest("[data-auth-form]");
+  if (authForm) {
+    event.preventDefault();
+    void submitAuthForm(authForm);
+    return;
+  }
   const form = event.target.closest(".modal-form");
   if (!form) return;
   event.preventDefault();
@@ -716,13 +836,14 @@ document.addEventListener("submit", (event) => {
   if (form.elements.participantIds) values.participantIds = formData.getAll("participantIds");
   if (entity === "projects") values.progress = Math.max(0, Math.min(100, Number(values.progress) || 0));
   if (entity === "events") values.reminderMinutes = Number(values.reminderMinutes || 0);
+  const apiEntity = entity === "activities" ? "tasks" : entity;
   const saveButton = form.querySelector('[type="submit"]');
   saveButton.disabled = true;
   const saveLabel = saveButton.textContent;
   saveButton.textContent = "Salvando...";
   const request = id
-    ? apiRequest(`/api/${entity}/${encodeURIComponent(id)}`, { method: "PUT", body: values })
-    : apiRequest(`/api/${entity}`, { method: "POST", body: values });
+    ? apiRequest(`/api/${apiEntity}/${encodeURIComponent(id)}`, { method: "PUT", body: values })
+    : apiRequest(`/api/${apiEntity}`, { method: "POST", body: values });
   request.then(refreshData).then(() => {
     document.getElementById("modal-root").innerHTML = "";
     render();
